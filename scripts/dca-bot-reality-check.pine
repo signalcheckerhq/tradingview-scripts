@@ -1,0 +1,167 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+//@version=6
+indicator("DCA Bot Reality Check: Deal Profit vs Real Result", "DCA Check", overlay = true, max_lines_count = 60, max_labels_count = 200)
+
+// ───── Inputs ─────
+const string G_BOT  = "The DCA bot"
+const string G_COST = "Costs"
+const string G_VIEW = "Display"
+
+int   t0      = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Start time (click the start candle)", confirm = true, group = G_BOT,
+     tooltip = "The bot opens its first deal at the close of this candle.")
+float baseQ   = input.float(100, "Base order (quote currency)", minval = 0.01, group = G_BOT)
+float soQ     = input.float(100, "Safety order (quote currency)", minval = 0.01, group = G_BOT)
+int   maxSO   = input.int(5, "Max safety orders", minval = 0, maxval = 25, group = G_BOT)
+float devPct  = input.float(2.0, "Price deviation to open safety orders (%)", minval = 0.01, step = 0.1, group = G_BOT)
+float stepSc  = input.float(1.0, "Safety order step scale", minval = 0.1, step = 0.1, group = G_BOT,
+     tooltip = "1 = equal steps. Above 1, each next safety order sits further below the previous one.")
+float volSc   = input.float(1.0, "Safety order volume scale", minval = 0.1, step = 0.1, group = G_BOT,
+     tooltip = "1 = every safety order is the same size. 2 = each one is twice the previous.")
+float tpPct   = input.float(1.5, "Take profit (%)", minval = 0.01, step = 0.1, group = G_BOT,
+     tooltip = "Measured from the deal's average buy price, like most DCA bots.")
+bool  restart = input.bool(true, "Start a new deal after each take profit", group = G_BOT)
+float feePct  = input.float(0.1, "Fee per trade (%)", minval = 0, step = 0.01, group = G_COST)
+bool  showLvl = input.bool(true, "Show levels of the open deal", group = G_VIEW)
+bool  showMk  = input.bool(true, "Mark closed deals", group = G_VIEW)
+bool  showTbl = input.bool(true, "Show table", group = G_VIEW)
+string tPos   = input.string("Top right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_VIEW)
+
+// ───── Setup ─────
+float fee = feePct / 100
+float dev = devPct / 100
+float tp  = tpPct / 100
+
+// Total drop from the deal's first buy at which safety order k (1-based) fills
+soDrop(int k) =>
+    float d = 0.0
+    for j = 0 to k - 1
+        d += dev * math.pow(stepSc, j)
+    d
+soSize(int k) => soQ * math.pow(volSc, k - 1)
+
+// The most a deal can use: base order + every safety order
+float maxCap = baseQ
+if maxSO > 0
+    for k = 1 to maxSO
+        maxCap += soSize(k)
+float covered = maxSO > 0 ? soDrop(maxSO) : 0.0
+
+var bool  started   = false
+var float p0        = na       // price at the very first buy (for "just holding")
+var float cash      = na
+var bool  inDeal    = false
+var float entry     = na       // first buy price of the current deal
+var float spent     = 0.0      // quote spent in the current deal
+var float coinsGross = 0.0     // coins bought before fees (used for the average price, like bots do)
+var float coinsNet  = 0.0      // coins actually held after fees
+var int   soUsed    = 0
+var int   dealStartBar = na
+var int   dealStartTime = na
+var float closedProfit = 0.0   // what the bot reports: profit of closed deals, after fees
+var int   deals     = 0        // closed deals = "profit" messages
+var float feesPaid  = 0.0
+var int   startBar  = na
+
+buy(float q, float px) =>
+    float c = q / px
+    [c, c * (1 - fee), q * fee]
+
+// ───── Start the first deal at the close of the start candle ─────
+if not started and time >= t0
+    started  := true
+    startBar := bar_index
+    p0       := close
+    cash     := maxCap
+    [g, n, f] = buy(baseQ, close)
+    inDeal := true, entry := close, spent := baseQ, coinsGross := g, coinsNet := n, soUsed := 0
+    cash -= baseQ, feesPaid += f
+    dealStartBar := bar_index, dealStartTime := time
+
+// ───── Every later candle ─────
+// A candle doesn't show whether its high or its low came first, so the take profit is checked first,
+// with the average price from before this candle. If it isn't reached, safety orders fill on the low.
+bool closedNow = false
+float closedPnl = na
+if started and bar_index > startBar
+    if inDeal
+        float avg = spent / coinsGross
+        float tpPx = avg * (1 + tp)
+        if high >= tpPx
+            float proceeds = coinsNet * tpPx * (1 - fee)
+            feesPaid     += coinsNet * tpPx * fee
+            cash         += proceeds
+            closedPnl    := proceeds - spent
+            closedProfit += closedPnl
+            deals        += 1
+            closedNow    := true
+            inDeal       := false
+        else
+            while soUsed < maxSO and low <= entry * (1 - soDrop(soUsed + 1))
+                int k = soUsed + 1
+                float px = entry * (1 - soDrop(k))
+                float q  = soSize(k)
+                [g, n, f] = buy(q, px)
+                spent += q, coinsGross += g, coinsNet += n
+                cash -= q, feesPaid += f
+                soUsed := k
+    if not inDeal and restart and closedNow
+        [g, n, f] = buy(baseQ, close)
+        inDeal := true, entry := close, spent := baseQ, coinsGross := g, coinsNet := n, soUsed := 0
+        cash -= baseQ, feesPaid += f
+        dealStartBar := bar_index, dealStartTime := time
+
+// ───── Results ─────
+float bagValue = inDeal ? coinsNet * close : 0.0
+float openPnl  = inDeal ? bagValue - spent : 0.0
+float realPnl  = started ? cash + bagValue - maxCap : na
+float holdPnl  = started ? maxCap * (1 - fee) / p0 * close - maxCap : na
+float avgNow   = inDeal ? spent / coinsGross : na
+float tpNow    = inDeal ? avgNow * (1 + tp) : na
+float lastSOpx = inDeal and maxSO > 0 ? entry * (1 - covered) : na
+bool  stuck    = inDeal and soUsed == maxSO and maxSO > 0 and close < lastSOpx
+
+// ───── Drawing ─────
+money(float v) => (v >= 0 ? "+" : "−") + str.tostring(math.abs(v), "#,##0.00")
+pctOf(float v) => (v >= 0 ? "+" : "−") + str.tostring(math.abs(v) / maxCap * 100, "0.0") + "%"
+
+if showMk and closedNow
+    label.new(bar_index, high, money(closedPnl), style = label.style_label_down, size = size.tiny,
+         color = color.new(closedPnl >= 0 ? color.green : color.red, 30), textcolor = color.white)
+
+var line lAvg = na
+var line lTp  = na
+var line lLast = na
+if barstate.islast and showLvl
+    line.delete(lAvg), line.delete(lTp), line.delete(lLast)
+    if inDeal
+        lAvg := line.new(dealStartBar, avgNow, bar_index, avgNow, extend = extend.right, color = color.new(color.gray, 20), style = line.style_dashed)
+        lTp  := line.new(dealStartBar, tpNow, bar_index, tpNow, extend = extend.right, color = color.new(color.green, 20))
+        if maxSO > 0 and lastSOpx > 0
+            lLast := line.new(dealStartBar, lastSOpx, bar_index, lastSOpx, extend = extend.right, color = color.new(color.orange, 20))
+
+// ───── Table ─────
+var table tbl = table.new(tPos == "Top right" ? position.top_right : tPos == "Bottom right" ? position.bottom_right : tPos == "Top left" ? position.top_left : position.bottom_left,
+     2, 11, bgcolor = color.new(#0f172a, 5), border_color = color.new(color.gray, 60), border_width = 1)
+
+row(int r, string k, string v, color c) =>
+    table.cell(tbl, 0, r, k, text_color = color.new(color.white, 25), text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+if barstate.islast and showTbl
+    table.clear(tbl, 0, 0, 1, 10)
+    table.cell(tbl, 0, 0, "DCA Check", text_color = color.white, text_size = size.normal, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, str.tostring(maxSO) + " safety orders, TP " + str.tostring(tpPct) + "%", text_color = color.gray, text_size = size.normal, text_halign = text.align_right)
+    if not started
+        row(1, "Waiting", "start candle not reached", color.gray)
+    else
+        row(1, "What the bot reports", money(closedProfit) + "  (" + str.tostring(deals) + " closed deals)", closedProfit >= 0 ? color.green : color.red)
+        row(2, "Open deal", inDeal ? money(openPnl) + "  (" + str.tostring(soUsed) + " of " + str.tostring(maxSO) + " safety orders used)" : "none", inDeal and openPnl < 0 ? color.red : color.white)
+        row(3, "Real result", money(realPnl) + "  (" + pctOf(realPnl) + ")", realPnl >= 0 ? color.green : color.red)
+        row(4, "Just holding the coin", money(holdPnl) + "  (" + pctOf(holdPnl) + ")", holdPnl >= 0 ? color.green : color.red)
+        row(5, "Bot vs holding", money(realPnl - holdPnl), realPnl >= holdPnl ? color.green : color.red)
+        row(6, "Money the bot needs", str.tostring(maxCap, "#,##0.00") + (covered < 1 ? "  (covers a " + str.tostring(covered * 100, "0.0") + "% drop)" : "  (last safety orders sit below zero: check the settings)"), covered < 1 ? color.white : color.orange)
+        row(7, "Open deal: average / target", inDeal ? str.tostring(avgNow, format.mintick) + " / " + str.tostring(tpNow, format.mintick) : "–", color.white)
+        row(8, "Open deal since", inDeal ? str.format_time(dealStartTime, "yyyy-MM-dd HH:mm", syminfo.timezone) : "–", color.gray)
+        row(9, "Fees paid", str.tostring(feesPaid, "#,##0.00"), color.orange)
+        row(10, "Status", stuck ? "STUCK: below the last safety order, waiting for price to return" : inDeal and soUsed == maxSO and maxSO > 0 ? "all safety orders used" : inDeal ? "deal open" : "no open deal", stuck ? color.orange : color.gray)

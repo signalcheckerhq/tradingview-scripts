@@ -1,0 +1,99 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ilonavoitenco
+//@version=6
+indicator("Liquidation vs Stop: Leverage Check", "Liq Check", overlay = true, max_lines_count = 10, max_labels_count = 10)
+
+// ───── Inputs ─────
+const string G_TRADE = "The trade"
+const string G_ACC   = "Account and exchange"
+const string G_VIEW  = "Display"
+
+string sideIn  = input.string("Long", "Side", options = ["Long", "Short"], group = G_TRADE)
+int    t0      = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Entry time (click the entry candle)", confirm = true, group = G_TRADE)
+float  entry   = input.price(0.0, "Entry", confirm = true, group = G_TRADE)
+float  stopLv  = input.price(0.0, "Stop loss", confirm = true, group = G_TRADE)
+float  lev     = input.float(10, "Leverage", minval = 1, step = 1, group = G_TRADE)
+
+float  bal     = input.float(1000, "Account balance", minval = 0, group = G_ACC)
+float  riskPct = input.float(1.0, "Risk per trade (%)", minval = 0.01, step = 0.1, group = G_ACC)
+float  mmrPct  = input.float(0.5, "Maintenance margin (%)", minval = 0, step = 0.1, group = G_ACC,
+     tooltip = "Check your exchange's value for this coin and position size. 0.4–0.5% is common for BTC on small positions.")
+float  feePct  = input.float(0.1, "Fee per side (%)", minval = 0, step = 0.01, group = G_ACC)
+
+bool   showTable = input.bool(true, "Show table", group = G_VIEW)
+string tablePos  = input.string("Top right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_VIEW)
+
+// ───── Math ─────
+// Isolated-margin estimate: long ≈ entry × (1 − 1/lev + mm), short ≈ entry × (1 + 1/lev − mm)
+int   dir      = sideIn == "Long" ? 1 : -1
+float mm       = mmrPct / 100
+float stopDist = entry > 0 ? dir * (entry - stopLv) / entry : na          // fraction, positive when the stop is on the right side
+bool  valid    = entry > 0 and stopLv > 0 and stopDist > 0
+float liq      = valid and lev > 1 ? entry * (1 - dir * (1 / lev - mm)) : na
+float liqDist  = na(liq) ? na : math.abs(liq / entry - 1)
+bool  liqFirst = not na(liq) and dir * (liq - stopLv) > 0                  // liquidation sits between entry and stop
+float maxLev   = valid ? 1 / (stopDist + mm) : na                           // highest leverage that keeps liquidation beyond the stop
+float riskAmt  = bal * riskPct / 100
+float sizeUsd  = valid ? riskAmt / (stopDist + 2 * feePct / 100) : na       // position size so a stop-out costs about riskAmt, fees included
+float margin   = na(sizeUsd) ? na : sizeUsd / lev
+float lossIfLiq = na(margin) ? na : margin                                  // isolated margin: liquidation takes the whole margin
+
+// ───── What happened since the entry time (chart candles) ─────
+// Both levels are on the same side, so whichever is closer to the entry is reached first.
+var int hitState = 0      // 0 = neither yet, 1 = stop hit, 2 = liquidated
+var int hitTime  = na
+if valid and time >= t0 and hitState == 0
+    float first = liqFirst ? liq : stopLv
+    bool touched = dir == 1 ? low <= first : high >= first
+    if touched
+        hitState := liqFirst ? 2 : 1
+        hitTime  := time
+
+// ───── Drawing ─────
+var line lE = na
+var line lS = na
+var line lL = na
+var label lbS = na
+var label lbL = na
+
+fmtP(float v) => str.tostring(v, format.mintick)
+fmtPct(float v) => na(v) ? "–" : str.tostring(v * 100, "0.00") + "%"
+
+if barstate.islast and valid
+    int x2 = na(hitTime) ? time : hitTime
+    line.delete(lE)
+    line.delete(lS)
+    line.delete(lL)
+    label.delete(lbS)
+    label.delete(lbL)
+    lE := line.new(t0, entry, x2, entry, xloc = xloc.bar_time, color = color.gray, width = 2)
+    lS := line.new(t0, stopLv, x2, stopLv, xloc = xloc.bar_time, color = color.red, width = 2)
+    lbS := label.new(x2, stopLv, "Stop", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
+    if not na(liq)
+        color lc = liqFirst ? color.fuchsia : color.purple
+        lL := line.new(t0, liq, x2, liq, xloc = xloc.bar_time, color = lc, width = 2, style = line.style_dotted)
+        lbL := label.new(x2, liq, liqFirst ? "Liquidation BEFORE stop" : "Liquidation", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(lc, 10), textcolor = color.white, size = size.small)
+
+// ───── Table ─────
+var table tbl = table.new(tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Top left" ? position.top_left : position.bottom_left, 2, 10, bgcolor = color.new(#0f172a, 5), border_color = color.new(color.gray, 60), border_width = 1)
+
+cell(int row, string k, string v, color vc) =>
+    table.cell(tbl, 0, row, k, text_color = color.new(color.white, 25), text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, row, v, text_color = vc, text_size = size.small, text_halign = text.align_right)
+
+if barstate.islast and showTable
+    table.clear(tbl, 0, 0, 1, 9)
+    table.cell(tbl, 0, 0, "Liq Check", text_color = color.white, text_size = size.normal, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, sideIn + " " + str.tostring(lev) + "x", text_color = dir == 1 ? color.green : color.red, text_size = size.normal, text_halign = text.align_right)
+    if not valid
+        cell(1, "Check the levels", sideIn == "Long" ? "stop must be below the entry" : "stop must be above the entry", color.orange)
+    else
+        cell(1, "Verdict", na(liq) ? "No liquidation at 1x" : liqFirst ? "Liquidated before your stop" : "Stop comes first", na(liq) or not liqFirst ? color.green : color.red)
+        cell(2, "Liquidation ≈", na(liq) ? "–" : fmtP(liq) + "  (" + fmtPct(liqDist) + " away)", liqFirst ? color.red : color.white)
+        cell(3, "Stop", fmtP(stopLv) + "  (" + fmtPct(stopDist) + " away)", color.white)
+        cell(4, "Max leverage with this stop", str.tostring(math.floor(maxLev * 10) / 10) + "x", lev > maxLev ? color.red : color.white)
+        cell(5, "Position size for " + str.tostring(riskPct) + "% risk", str.tostring(sizeUsd, "#,##0.00"), color.white)
+        cell(6, "Margin needed at " + str.tostring(lev) + "x", str.tostring(margin, "#,##0.00") + (margin > bal ? "  (more than balance!)" : ""), margin > bal ? color.red : color.white)
+        cell(7, "Loss at stop (with fees)", str.tostring(riskAmt, "#,##0.00"), color.orange)
+        cell(8, "Loss if liquidated", liqFirst ? str.tostring(lossIfLiq, "#,##0.00") + " (whole margin)" : "–", liqFirst ? color.red : color.gray)
+        cell(9, "Since entry time", hitState == 2 ? "Liquidated" : hitState == 1 ? "Stop hit" : "Neither level hit yet", hitState == 0 ? color.gray : color.red)

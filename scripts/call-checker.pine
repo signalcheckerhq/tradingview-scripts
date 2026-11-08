@@ -1,0 +1,242 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ilonavoitenco
+//@version=6
+indicator("Call Checker: Real Result After Fees", "Call Check", overlay = true, max_lines_count = 20, max_labels_count = 30)
+
+// ───── Inputs ─────
+const string G_CALL  = "The call"
+const string G_RULES = "Rules"
+const string G_VIEW  = "Display"
+
+string sideIn   = input.string("Long", "Side", options = ["Long", "Short"], group = G_CALL)
+int    callTime = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Call time (click the candle when the call was posted)", confirm = true, group = G_CALL)
+float  entryIn  = input.price(0.0, "Entry", confirm = true, group = G_CALL)
+float  stopIn   = input.price(0.0, "Stop loss", confirm = true, group = G_CALL)
+float  tp1In    = input.price(0.0, "Target 1", confirm = true, group = G_CALL)
+float  tp2In    = input.float(0.0, "Target 2 (0 = none)", minval = 0, group = G_CALL)
+float  tp3In    = input.float(0.0, "Target 3 (0 = none)", minval = 0, group = G_CALL)
+
+string entryType = input.string("Limit at entry price", "Entry type", options = ["Limit at entry price", "Market at call time"], group = G_RULES,
+     tooltip = "Limit: the trade only counts once price actually trades at the entry. Market: the trade starts at the open of the call candle.")
+float  feePct    = input.float(0.1, "Fee per side (%)", minval = 0, step = 0.01, group = G_RULES, tooltip = "Charged on the entry and on every exit. 0.1% is a typical spot taker fee.")
+float  lev       = input.float(1.0, "Leverage (1 = spot)", minval = 1, step = 1, group = G_RULES, tooltip = "Above 1, an approximate liquidation price is checked before the stop (maintenance margin and funding are ignored).")
+float  fillHours = input.float(48, "Fill window (hours)", minval = 1, group = G_RULES, tooltip = "A limit entry that doesn't fill within this time counts as 'Not filled'.")
+float  maxDays   = input.float(30, "Max trade length (days)", minval = 1, group = G_RULES, tooltip = "Anything still open after this is closed at that candle's close.")
+bool   useLtf    = input.bool(true, "Settle stop/target in the same candle with lower-timeframe data", group = G_RULES,
+     tooltip = "When the stop and a target are both inside one candle, look at smaller candles to see which came first. If that data is missing, the stop counts (the worse outcome).")
+string ltfIn     = input.timeframe("1", "Lower timeframe", group = G_RULES)
+bool   showTable = input.bool(true, "Show results table", group = G_VIEW)
+string tablePos  = input.string("Top right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_VIEW)
+
+// ───── Setup ─────
+int   dir    = sideIn == "Long" ? 1 : -1
+float entry  = entryIn
+float stopLv = stopIn
+float tp1    = tp1In
+float tp2    = tp2In
+float tp3    = tp3In
+int   nTp    = (tp1 > 0 ? 1 : 0) + (tp2 > 0 ? 1 : 0) + (tp3 > 0 ? 1 : 0)
+float share  = nTp > 0 ? 1.0 / nTp : 1.0
+
+// A level is "beyond" the entry in the trade's direction when dir * (level - entry) > 0
+bool levelsOk = entry > 0 and stopLv > 0 and dir * (entry - stopLv) > 0
+     and (tp1 <= 0 or dir * (tp1 - entry) > 0)
+     and (tp2 <= 0 or (tp1 > 0 and dir * (tp2 - tp1) > 0))
+     and (tp3 <= 0 or (tp2 > 0 and dir * (tp3 - tp2) > 0))
+
+// Lower-timeframe candles (requested on every bar; only read when a candle is ambiguous).
+// If the chosen lower timeframe isn't lower than the chart's, the chart's own timeframe is used (one candle per bar).
+string ltf = timeframe.in_seconds(ltfIn) < timeframe.in_seconds() ? ltfIn : timeframe.period
+[ltfHigh, ltfLow] = request.security_lower_tf(syminfo.tickerid, ltf, [high, low])
+
+// ───── State ─────
+// 0 = before the call, 1 = waiting for the entry, 2 = in the trade, 3 = finished
+var int    state      = 0
+var int    callBar    = na
+var int    fillBar    = na
+var int    fillTime   = na
+var float  fillPrice  = na
+var int    exitBar    = na
+var int    startTime  = na
+var int    exitTime   = na
+var string exitReason = ""
+var float  realized   = 0.0   // sum of share × price-move fraction, signed for the trade direction
+var float  feeSum     = 0.0   // fees as % of the position
+var float  remaining  = 1.0   // part of the position still open
+var bool   hit1       = false
+var bool   hit2       = false
+var bool   hit3       = false
+var int    tpCount    = 0
+var bool   usedLtf    = false
+var bool   tooEarly   = false
+
+float liq = lev > 1 and entry > 0 ? entry * (1 - dir / lev) : na
+// The adverse level hit first when price moves against the trade: liquidation if it sits closer to the entry than the stop.
+bool  liqFirst = not na(liq) and dir * (liq - stopLv) > 0
+float advLevel = liqFirst ? liq : stopLv
+
+if bar_index == 0 and time > callTime
+    tooEarly := true
+
+if levelsOk and not tooEarly
+    // Start at the first candle that opens at or after the call time (clicking a candle sets the call time to its open)
+    if state == 0 and time >= callTime
+        state   := 1
+        callBar := bar_index
+        startTime := time
+
+    bool filledNow = false
+    if state == 1
+        if entryType == "Market at call time"
+            fillPrice := open
+            filledNow := true
+        else if low <= entry and high >= entry
+            fillPrice := entry
+            filledNow := true
+        if filledNow
+            state    := 2
+            fillBar  := bar_index
+            fillTime := time
+            feeSum   += feePct
+            label.new(bar_index, fillPrice, "Filled", style = label.style_label_left, color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+        else if time_close - callTime >= fillHours * 3600000
+            state      := 3
+            exitBar    := bar_index
+            exitTime := time
+            exitReason := "Not filled"
+
+    if state == 2
+        // Candles to walk through: the chart candle, or its lower-timeframe candles when the stop and a target overlap
+        bool limitFillBar = filledNow and entryType == "Limit at entry price"
+        bool advHere = dir == 1 ? low <= advLevel : high >= advLevel
+        float nextTp = not hit1 and tp1 > 0 ? tp1 : not hit2 and tp2 > 0 ? tp2 : not hit3 and tp3 > 0 ? tp3 : na
+        bool tpHere = not limitFillBar and not na(nextTp) and (dir == 1 ? high >= nextTp : low <= nextTp)
+        array<float> hs = array.from(high)
+        array<float> ls = array.from(low)
+        if advHere and tpHere and useLtf and ltf != timeframe.period and array.size(ltfHigh) > 0
+            hs := ltfHigh
+            ls := ltfLow
+            usedLtf := true
+        int n = array.size(hs)
+        if n > 0
+            for i = 0 to n - 1
+                if state != 2
+                    break
+                float h = array.get(hs, i)
+                float l = array.get(ls, i)
+                // On a limit fill candle, targets don't count (price may have touched them before the fill); the stop does.
+                bool canTp = not limitFillBar
+                bool adv = dir == 1 ? l <= advLevel : h >= advLevel
+                if adv
+                    // Worse outcome first: when the stop/liquidation and a target share a candle, the stop counts
+                    realized += remaining * dir * (advLevel / fillPrice - 1)
+                    feeSum   += remaining * feePct
+                    remaining := 0.0
+                    state     := 3
+                    exitBar   := bar_index
+                    exitTime := time
+                    exitReason := liqFirst ? "Liquidated" : (tpCount > 0 ? "Stopped after TP" + str.tostring(tpCount) : "Stopped out")
+                    label.new(bar_index, advLevel, liqFirst ? "Liquidated" : "Stop", style = dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
+                else if canTp
+                    // Realize every target this candle reached, in order
+                    if not hit1 and tp1 > 0 and (dir == 1 ? h >= tp1 : l <= tp1)
+                        hit1 := true
+                        tpCount += 1
+                        realized += share * dir * (tp1 / fillPrice - 1)
+                        feeSum   += share * feePct
+                        remaining -= share
+                        label.new(bar_index, tp1, "TP1", style = dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.green, 10), textcolor = color.white, size = size.small)
+                    if hit1 and not hit2 and tp2 > 0 and (dir == 1 ? h >= tp2 : l <= tp2)
+                        hit2 := true
+                        tpCount += 1
+                        realized += share * dir * (tp2 / fillPrice - 1)
+                        feeSum   += share * feePct
+                        remaining -= share
+                        label.new(bar_index, tp2, "TP2", style = dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.green, 10), textcolor = color.white, size = size.small)
+                    if hit2 and not hit3 and tp3 > 0 and (dir == 1 ? h >= tp3 : l <= tp3)
+                        hit3 := true
+                        tpCount += 1
+                        realized += share * dir * (tp3 / fillPrice - 1)
+                        feeSum   += share * feePct
+                        remaining -= share
+                        label.new(bar_index, tp3, "TP3", style = dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.green, 10), textcolor = color.white, size = size.small)
+                    if nTp > 0 and remaining <= 1e-9
+                        remaining := 0.0
+                        state     := 3
+                        exitBar   := bar_index
+                        exitTime := time
+                        exitReason := "All targets hit"
+        // Time limit
+        if state == 2 and time_close - fillTime >= maxDays * 86400000
+            realized += remaining * dir * (close / fillPrice - 1)
+            feeSum   += remaining * feePct
+            remaining := 0.0
+            state     := 3
+            exitBar   := bar_index
+            exitTime := time
+            exitReason := "Closed after " + str.tostring(maxDays) + " days"
+            label.new(bar_index, close, "Time exit", style = label.style_label_left, color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
+
+// ───── Drawing ─────
+var line lEntry = na
+var line lStop  = na
+var line lTp1   = na
+var line lTp2   = na
+var line lTp3   = na
+var line lLiq   = na
+
+fmtPct(float v) =>
+    na(v) ? "–" : (v >= 0 ? "+" : "") + str.tostring(v, "0.00") + "%"
+
+drawLevel(line old, float price, color col, int t1, int t2, string styleIn) =>
+    line.delete(old)
+    price > 0 ? line.new(t1, price, t2, price, xloc = xloc.bar_time, color = col, width = 2, style = styleIn) : line(na)
+
+if barstate.islast and levelsOk and not na(startTime)
+    int x2 = na(exitTime) ? time : exitTime
+    lEntry := drawLevel(lEntry, entry, color.gray, startTime, x2, line.style_solid)
+    lStop  := drawLevel(lStop, stopLv, color.red, startTime, x2, line.style_solid)
+    lTp1   := drawLevel(lTp1, tp1, color.green, startTime, x2, line.style_dashed)
+    lTp2   := drawLevel(lTp2, tp2, color.green, startTime, x2, line.style_dashed)
+    lTp3   := drawLevel(lTp3, tp3, color.green, startTime, x2, line.style_dashed)
+    lLiq   := drawLevel(lLiq, na(liq) ? 0.0 : liq, color.purple, startTime, x2, line.style_dotted)
+
+// ───── Results table ─────
+var table tbl = table.new(tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Top left" ? position.top_left : position.bottom_left, 2, 10, bgcolor = color.new(#0f172a, 5), border_color = color.new(color.gray, 60), border_width = 1)
+
+cell(int row, string k, string v, color vc) =>
+    table.cell(tbl, 0, row, k, text_color = color.new(color.white, 25), text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, row, v, text_color = vc, text_size = size.small, text_halign = text.align_right)
+
+if barstate.islast and showTable
+    table.clear(tbl, 0, 0, 1, 9)
+    table.cell(tbl, 0, 0, "Call Checker", text_color = color.white, text_size = size.normal, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, sideIn, text_color = dir == 1 ? color.green : color.red, text_size = size.normal, text_halign = text.align_right)
+    if not levelsOk
+        cell(1, "Check the levels", sideIn == "Long" ? "stop < entry < TP1 < TP2 < TP3" : "stop > entry > TP1 > TP2 > TP3", color.orange)
+        cell(2, "Note", "TP2 needs TP1, TP3 needs TP2", color.gray)
+    else if tooEarly
+        cell(1, "Call time", "before this chart's first candle", color.orange)
+        cell(2, "Fix", "use a higher timeframe or scroll back", color.orange)
+    else if state == 0
+        cell(1, "Status", "Waiting for the call time", color.gray)
+    else if state == 1
+        cell(1, "Status", "Waiting for the entry to fill", color.gray)
+    else if na(fillPrice)
+        cell(1, "Result", exitReason, color.gray)
+        cell(2, "P&L", "0% (no trade)", color.gray)
+    else
+        float openPart = state == 2 ? remaining * dir * (close / fillPrice - 1) * 100 : 0.0
+        float openFee  = state == 2 ? remaining * feePct : 0.0
+        float gross    = realized * 100 + openPart
+        float fees     = feeSum + openFee
+        float net      = gross - fees
+        cell(1, "Status", state == 2 ? "Still open" : exitReason, state == 2 ? color.yellow : net >= 0 ? color.green : color.red)
+        cell(2, "Filled at", str.tostring(fillPrice, format.mintick), color.white)
+        cell(3, "Targets hit", str.tostring(tpCount) + " of " + str.tostring(nTp), color.white)
+        cell(4, "Price move (before fees)", fmtPct(gross), gross >= 0 ? color.green : color.red)
+        cell(5, "Fees", "-" + str.tostring(fees, "0.00") + "%", color.orange)
+        cell(6, "Result after fees", fmtPct(net), net >= 0 ? color.green : color.red)
+        cell(7, lev > 1 ? "On margin (x" + str.tostring(lev) + ")" : "On margin", fmtPct(math.max(net * lev, -100.0)), net >= 0 ? color.green : color.red)
+        cell(8, "Candles in trade", str.tostring((na(exitBar) ? bar_index : exitBar) - fillBar + 1), color.white)
+        cell(9, "Same-candle rule", usedLtf ? "settled with " + ltf + " data" : "stop counts first", color.gray)

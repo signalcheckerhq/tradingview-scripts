@@ -1,0 +1,138 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ilonavoitenco
+//@version=6
+indicator("Grid Bot Reality Check: Bot Profit vs Real Result", "Grid Check", overlay = true, max_lines_count = 120, max_labels_count = 5)
+
+// ───── Inputs ─────
+const string G_BOT  = "The grid bot"
+const string G_COST = "Costs"
+const string G_VIEW = "Display"
+
+int   t0      = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Start time (click the start candle)", confirm = true, group = G_BOT,
+     tooltip = "The bot starts at the close of this candle.")
+float upperIn = input.price(0.0, "Upper price", confirm = true, group = G_BOT)
+float lowerIn = input.price(0.0, "Lower price", confirm = true, group = G_BOT)
+int   nGrids  = input.int(20, "Number of grids", minval = 2, maxval = 100, group = G_BOT)
+float invest  = input.float(1000, "Investment (quote currency)", minval = 1, group = G_BOT)
+bool  geo     = input.bool(false, "Geometric grid (equal % steps)", group = G_BOT,
+     tooltip = "Off = arithmetic grid (equal price steps), the default on most exchanges.")
+float feePct  = input.float(0.1, "Fee per trade (%)", minval = 0, step = 0.01, group = G_COST)
+bool  showLvl = input.bool(true, "Show grid levels", group = G_VIEW)
+bool  showTbl = input.bool(true, "Show table", group = G_VIEW)
+string tPos   = input.string("Top right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_VIEW)
+
+// ───── Setup ─────
+float upper = math.max(upperIn, lowerIn)
+float lower = math.min(upperIn, lowerIn)
+bool  valid = lower > 0 and upper > lower
+float fee   = feePct / 100
+float q     = invest / nGrids                 // quote amount per grid
+
+levelAt(int i) =>
+    float f = float(i) / nGrids
+    geo ? lower * math.pow(upper / lower, f) : lower + (upper - lower) * f
+
+// Per-grid state: holding coins bought for that grid, and how many
+var array<bool>  holding = array.new<bool>()
+var array<float> coins   = array.new<float>()
+var bool  started   = false
+var float p0        = na
+var float cash      = na
+var float gridProfit = 0.0     // what a bot dashboard reports: completed buy→sell cycles, after fees
+var int   sells     = 0        // each completed sell = one "profit" message
+var float feesPaid  = 0.0
+var int   startBar  = na
+
+// ───── Start: buy the coins needed for the sell orders above the price ─────
+if valid and not started and time >= t0
+    started  := true
+    startBar := bar_index
+    p0       := close
+    cash     := invest
+    for i = 0 to nGrids - 1
+        float up = levelAt(i + 1)
+        bool h = up > p0
+        array.push(holding, h)
+        if h
+            float c = q / p0 * (1 - fee)
+            array.push(coins, c)
+            cash     -= q
+            feesPaid += q * fee
+        else
+            array.push(coins, 0.0)
+
+// ───── Every later candle: fill buy orders on the way down, sell orders on the way up ─────
+// One action per grid per candle (we can't see the order of high and low inside a candle).
+if started and bar_index > startBar
+    for i = 0 to nGrids - 1
+        float lo = levelAt(i)
+        float up = levelAt(i + 1)
+        if array.get(holding, i)
+            if high >= up
+                float c = array.get(coins, i)
+                float proceeds = c * up * (1 - fee)
+                feesPaid   += c * up * fee
+                cash       += proceeds
+                gridProfit += q * ((1 - fee) * (1 - fee) * up / lo - 1)   // dashboards count one grid step per sell
+                sells      += 1
+                array.set(holding, i, false)
+                array.set(coins, i, 0.0)
+        else
+            if low <= lo
+                float c = q / lo * (1 - fee)
+                feesPaid += q * fee
+                cash     -= q
+                array.set(holding, i, true)
+                array.set(coins, i, c)
+
+// ───── Results ─────
+float coinsHeld = 0.0
+float bagCost   = 0.0
+if started
+    for i = 0 to nGrids - 1
+        if array.get(holding, i)
+            coinsHeld += array.get(coins, i)
+            bagCost   += q
+float bagValue  = coinsHeld * close
+float openPnl   = bagValue - bagCost
+float realPnl   = started ? cash + bagValue - invest : na
+float holdPnl   = started ? invest * (1 - fee) / p0 * close - invest : na
+bool  below     = started and close < lower
+bool  above     = started and close > upper
+
+// ───── Drawing ─────
+var array<line> lvLines = array.new<line>()
+if barstate.islast and valid and showLvl and array.size(lvLines) == 0
+    for i = 0 to nGrids
+        bool edge = i == 0 or i == nGrids
+        array.push(lvLines, line.new(t0, levelAt(i), time, levelAt(i), xloc = xloc.bar_time, extend = extend.right,
+             color = edge ? color.new(color.orange, 0) : color.new(color.gray, 70), width = edge ? 2 : 1))
+
+// ───── Table ─────
+var table tbl = table.new(tPos == "Top right" ? position.top_right : tPos == "Bottom right" ? position.bottom_right : tPos == "Top left" ? position.top_left : position.bottom_left,
+     2, 10, bgcolor = color.new(#0f172a, 5), border_color = color.new(color.gray, 60), border_width = 1)
+
+money(float v) => (v >= 0 ? "+" : "−") + str.tostring(math.abs(v), "#,##0.00")
+pctOf(float v) => (v >= 0 ? "+" : "−") + str.tostring(math.abs(v) / invest * 100, "0.0") + "%"
+row(int r, string k, string v, color c) =>
+    table.cell(tbl, 0, r, k, text_color = color.new(color.white, 25), text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+if barstate.islast and showTbl
+    table.clear(tbl, 0, 0, 1, 9)
+    table.cell(tbl, 0, 0, "Grid Check", text_color = color.white, text_size = size.normal, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, str.tostring(nGrids) + " grids", text_color = color.gray, text_size = size.normal, text_halign = text.align_right)
+    if not valid
+        row(1, "Set the range", "upper must be above lower", color.orange)
+    else if not started
+        row(1, "Waiting", "start candle not reached", color.gray)
+    else
+        row(1, "What the bot reports", money(gridProfit) + "  (" + str.tostring(sells) + " profit messages)", color.green)
+        row(2, "Open position (coins held)", money(openPnl), openPnl >= 0 ? color.white : color.red)
+        row(3, "Real result", money(realPnl) + "  (" + pctOf(realPnl) + ")", realPnl >= 0 ? color.green : color.red)
+        row(4, "Just holding the coin", money(holdPnl) + "  (" + pctOf(holdPnl) + ")", holdPnl >= 0 ? color.green : color.red)
+        row(5, "Bot vs holding", money(realPnl - holdPnl), realPnl >= holdPnl ? color.green : color.red)
+        row(6, "Coins held now", str.tostring(coinsHeld, "#,##0.######") + "  (cost " + str.tostring(bagCost, "#,##0.00") + ")", color.white)
+        row(7, "Fees paid", str.tostring(feesPaid, "#,##0.00"), color.orange)
+        row(8, "Started at", str.tostring(p0, format.mintick), color.gray)
+        row(9, "Price vs range", below ? "BELOW the range: bot is just holding coins" : above ? "ABOVE the range: bot sold everything" : "inside the range", below or above ? color.orange : color.gray)
