@@ -1,6 +1,6 @@
 # SignalCheckerHQ TradingView scripts
 
-Free, open-source TradingView indicators (Pine Script v6). Each one shows the **real result after fees** next to the number traders usually see: a call's "+50%", a grid bot's "grid profit", a DCA bot's closed deals.
+Free, open-source TradingView indicators and a strategy template (Pine Script v6). Each one shows the **real result after fees** next to the number traders usually see: a call's "+50%", a grid bot's "grid profit", a DCA bot's closed deals, a backtest run with zero fees.
 
 Same scripts as on TradingView (search "SignalCheckerHQ"), same code, so anyone can read exactly how every number is counted.
 
@@ -10,6 +10,7 @@ Same scripts as on TradingView (search "SignalCheckerHQ"), same code, so anyone 
 | [Liquidation vs Stop](scripts/liquidation-vs-stop.pine) | At this leverage, does liquidation come before your stop? What's the highest leverage that keeps the stop safe? | [open](https://www.tradingview.com/script/o4j1Ke3E-Liquidation-vs-Stop-Leverage-Check/) |
 | [Grid Bot Reality Check](scripts/grid-bot-reality-check.pine) | A grid bot's reported "grid profit" next to the real account result, with the open position and fees included | [open](https://www.tradingview.com/script/wQCQr5Im-Grid-Bot-Reality-Check-Bot-Profit-vs-Real-Result/) |
 | [DCA Bot Reality Check](scripts/dca-bot-reality-check.pine) | Closed-deal profit vs the real result with the open deal, next to simply holding | [open](https://www.tradingview.com/script/wTaHVdqR-DCA-Bot-Reality-Check-Deal-Profit-vs-Real-Result/) |
+| [Honest Backtest](scripts/honest-backtest.pine) (strategy) | A strategy test with realistic costs (0.1% commission, slippage, no leverage, 10% per trade), next to holding the same amount. Swap in your own rules; the costs and the table stay | [open](https://www.tradingview.com/script/DGL5Cr0H-Honest-Backtest-Fees-Slippage-and-Buy-and-Hold/) |
 
 ## How to use
 

@@ -1,0 +1,94 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+//@version=6
+// Honest Backtest Template: fees, slippage and buy & hold
+// Open source. A simple moving-average crossover with realistic costs switched on,
+// so the result you see is closer to what an account would have done.
+strategy("Honest Backtest: Fees, Slippage & Buy-and-Hold", shorttitle = "Honest Backtest", overlay = true,
+     initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type = strategy.commission.percent, commission_value = 0.1, slippage = 2,
+     pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = false, margin_long = 100, margin_short = 100)
+
+// ── Inputs ─────────────────────────────────────────────
+gS        = "Signals"
+maType    = input.string("SMA", "Average type", options = ["SMA", "EMA"], group = gS)
+fastLen   = input.int(9, "Fast length", minval = 1, group = gS)
+slowLen   = input.int(18, "Slow length", minval = 2, group = gS)
+mode      = input.string("Long and short", "Direction", options = ["Long and short", "Long only"], group = gS,
+     tooltip = "Long and short: always in the market, flips on every cross. Long only: buys on a cross up and goes flat on a cross down.")
+gD        = "Test window"
+useStart  = input.bool(false, "Start from a date", group = gD, inline = "d")
+startTime = input.time(timestamp("2026-08-01T00:00:00"), "", group = gD, inline = "d",
+     tooltip = "Leave off to test all loaded history. Turn on to test only from this date (useful to check a period you did not tune on).")
+gT        = "Table"
+showTable = input.bool(true, "Show results table", group = gT)
+tablePos  = input.string("Bottom right", "Position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = gT)
+
+// ── Signals (closed bars only: no repainting) ──────────
+ma(src, len) => maType == "EMA" ? ta.ema(src, len) : ta.sma(src, len)
+fast    = ma(close, fastLen)
+slow    = ma(close, slowLen)
+inRange = not useStart or time >= startTime
+crossUp = ta.crossover(fast, slow)
+crossDn = ta.crossunder(fast, slow)
+
+plot(fast, "Fast", color = color.new(color.teal, 0), linewidth = 2)
+plot(slow, "Slow", color = color.new(color.orange, 0), linewidth = 2)
+
+if inRange and barstate.isconfirmed
+    if crossUp
+        strategy.entry("Long", strategy.long)
+    if crossDn
+        if mode == "Long and short"
+            strategy.entry("Short", strategy.short)
+        else
+            strategy.close("Long")
+
+// ── Buy and hold over the same window ──────────────────
+var float firstClose = na
+if inRange and na(firstClose)
+    firstClose := close
+var float holdQty = na
+if inRange and na(holdQty)
+    holdQty := strategy.default_entry_qty(close)
+holdPct    = na(firstClose) ? na : (close / firstClose - 1) * 100
+// Same order size as the strategy, bought once on the first bar and held (fees ignored)
+holdOnCap  = na(holdQty) ? na : holdQty * (close - firstClose) / strategy.initial_capital * 100
+
+// ── Fees paid (closed trades + any open trade) ─────────
+var float feesClosed = 0.0
+if strategy.closedtrades > strategy.closedtrades[1]
+    for i = strategy.closedtrades[1] to strategy.closedtrades - 1
+        feesClosed += strategy.closedtrades.commission(i)
+feesOpen = strategy.opentrades > 0 ? strategy.opentrades.commission(0) : 0.0
+feesAll  = feesClosed + feesOpen
+
+// ── Results table ──────────────────────────────────────
+pos = tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Bottom left" ? position.bottom_left : position.top_left
+var table t = table.new(pos, 2, 10, bgcolor = color.new(#0b1120, 0), border_color = color.new(#24304a, 0), border_width = 1, frame_color = color.new(#24304a, 0), frame_width = 1)
+
+f(x, d) => str.tostring(x, d == 2 ? "#,##0.00" : "#,##0.0")
+row(r, label, value, col) =>
+    table.cell(t, 0, r, label, text_color = color.new(#cbd5e1, 0), text_halign = text.align_left, text_size = size.small)
+    table.cell(t, 1, r, value, text_color = col, text_halign = text.align_right, text_size = size.small)
+
+if showTable and (barstate.islastconfirmedhistory or barstate.islast)
+    eq       = strategy.initial_capital + strategy.netprofit + strategy.openprofit
+    netPct   = (eq / strategy.initial_capital - 1) * 100
+    tradesN  = strategy.closedtrades
+    winRate  = tradesN > 0 ? strategy.wintrades / tradesN * 100 : na
+    feeShare = feesAll / strategy.initial_capital * 100
+    green    = color.new(#3ddc84, 0)
+    red      = color.new(#ff6b6b, 0)
+    white    = color.new(#ffffff, 0)
+    table.cell(t, 0, 0, "Honest backtest", text_color = green, text_halign = text.align_left, text_size = size.small)
+    table.cell(t, 1, 0, "costs from Properties", text_color = color.new(#94a3b8, 0), text_halign = text.align_right, text_size = size.tiny)
+    row(1, "Net result", (netPct >= 0 ? "+" : "") + f(netPct, 1) + "%", netPct >= 0 ? green : red)
+    row(2, "Hold, same size", na(holdOnCap) ? "n/a" : (holdOnCap >= 0 ? "+" : "") + f(holdOnCap, 1) + "%", white)
+    row(3, "Coin change", na(holdPct) ? "n/a" : (holdPct >= 0 ? "+" : "") + f(holdPct, 1) + "%", white)
+    row(4, "Closed trades", str.tostring(tradesN), white)
+    row(5, "Win rate", na(winRate) ? "n/a" : f(winRate, 1) + "%", white)
+    row(6, "Fees paid", f(feesAll, 2) + " (" + f(feeShare, 1) + "% of start)", red)
+    row(7, "Max drawdown", f(strategy.max_drawdown, 2) + " (" + f(strategy.max_drawdown_percent, 1) + "%)", red)
+    row(8, "Start capital", f(strategy.initial_capital, 2), white)
+    row(9, "Check", "Signals on closed bars, filled next bar", color.new(#94a3b8, 0))
