@@ -35,6 +35,8 @@ These are analysis tools for past prices. They don't place trades, don't connect
 
 The same checks, without TradingView, run free in the browser at [signalcheckerhq.org/tools](https://signalcheckerhq.org/tools/).
 
+New to the tools? Each one has a short screen-recorded walkthrough (under a minute): [signalcheckerhq.org/tutorials](https://signalcheckerhq.org/tutorials/). Live prices and the highest leverage that survived today's range: [signalcheckerhq.org/markets](https://signalcheckerhq.org/markets/).
+
 ## License
 
 [Mozilla Public License 2.0](LICENSE), the default license for open-source scripts on TradingView. © SignalCheckerHQ.
