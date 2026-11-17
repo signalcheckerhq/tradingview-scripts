@@ -1,0 +1,116 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+
+//@version=6
+// TP/SL Reality: Win Rate vs Payoff
+// Open source. Opens a test trade every N bars with a fixed take profit and stop loss,
+// replays it on the chart's own candles and shows whether the win rate is high enough
+// for that payoff once fees are counted.
+indicator("TP/SL Reality: Win Rate vs Payoff", shorttitle = "TP/SL Reality", overlay = true)
+
+// ── Inputs ─────────────────────────────────────────────
+gT       = "Test trades"
+side     = input.string("Long", "Direction", options = ["Long", "Short"], group = gT)
+tpPct    = input.float(1.0, "Take profit %", minval = 0.01, step = 0.1, group = gT)
+slPct    = input.float(3.0, "Stop loss %", minval = 0.01, step = 0.1, group = gT)
+feePct   = input.float(0.1, "Fee per side %", minval = 0, step = 0.01, group = gT,
+     tooltip = "Paid on entry and on exit. Spot taker fees are often 0.1% per side.")
+every    = input.int(5, "Open a test trade every N bars", minval = 1, group = gT,
+     tooltip = "A new test trade opens at the close of every Nth bar, so the result does not depend on any entry signal.")
+maxHold  = input.int(200, "Close at market after N bars", minval = 1, maxval = 1000, group = gT,
+     tooltip = "A trade that reaches neither level in time is closed at that bar's close.")
+gD       = "Test window"
+useStart = input.bool(false, "Start from a date", group = gD, inline = "d")
+startT   = input.time(timestamp("2026-08-01T00:00:00"), "", group = gD, inline = "d")
+gV       = "Table"
+tablePos = input.string("Bottom right", "Position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = gV)
+
+isLong  = side == "Long"
+fee2    = 2 * feePct
+inRange = not useStart or time >= startT
+
+// ── State ──────────────────────────────────────────────
+var array<float> entryPx  = array.new<float>()
+var array<int>   entryBar = array.new<int>()
+var int   wins      = 0
+var int   losses    = 0
+var int   timeouts  = 0
+var float sumPnl    = 0.0
+var float sumWinPnl = 0.0
+var float sumLosPnl = 0.0
+var int   streak    = 0
+var int   maxStreak = 0
+
+// ── Resolve open test trades (closed bars only) ────────
+if barstate.isconfirmed and array.size(entryPx) > 0
+    int i = array.size(entryPx) - 1
+    while i >= 0
+        float ep = array.get(entryPx, i)
+        int   eb = array.get(entryBar, i)
+        if bar_index > eb
+            float tp = isLong ? ep * (1 + tpPct / 100) : ep * (1 - tpPct / 100)
+            float sl = isLong ? ep * (1 - slPct / 100) : ep * (1 + slPct / 100)
+            bool hitTp = isLong ? high >= tp : low <= tp
+            bool hitSl = isLong ? low <= sl : high >= sl
+            float pnl = na
+            if hitSl
+                // if both levels sit inside one candle, the stop is counted first (worst case)
+                pnl := -slPct - fee2
+            else if hitTp
+                pnl := tpPct - fee2
+            else if bar_index - eb >= maxHold
+                pnl := (isLong ? close / ep - 1 : 1 - close / ep) * 100 - fee2
+                timeouts += 1
+            if not na(pnl)
+                sumPnl += pnl
+                if pnl > 0
+                    wins += 1
+                    sumWinPnl += pnl
+                    streak := 0
+                else
+                    losses += 1
+                    sumLosPnl += pnl
+                    streak += 1
+                    maxStreak := math.max(maxStreak, streak)
+                array.remove(entryPx, i)
+                array.remove(entryBar, i)
+        i -= 1
+
+// ── Open a new test trade ──────────────────────────────
+if barstate.isconfirmed and inRange and bar_index % every == 0
+    array.push(entryPx, close)
+    array.push(entryBar, bar_index)
+
+// ── Results table ──────────────────────────────────────
+pos = tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Bottom left" ? position.bottom_left : position.top_left
+var table t = table.new(pos, 2, 11, bgcolor = color.new(#0b1120, 0), border_color = color.new(#24304a, 0), border_width = 1, frame_color = color.new(#24304a, 0), frame_width = 1)
+
+f(x) => str.tostring(x, "#,##0.00")
+row(r, label, value, col) =>
+    table.cell(t, 0, r, label, text_color = color.new(#cbd5e1, 0), text_halign = text.align_left, text_size = size.small)
+    table.cell(t, 1, r, value, text_color = col, text_halign = text.align_right, text_size = size.small)
+
+if barstate.islast
+    n        = wins + losses
+    winRate  = n > 0 ? float(wins) / n * 100 : na
+    avgWin   = wins > 0 ? sumWinPnl / wins : na
+    avgLoss  = losses > 0 ? -sumLosPnl / losses : na
+    beRate   = na(avgWin) or na(avgLoss) ? na : avgLoss / (avgWin + avgLoss) * 100
+    expect   = n > 0 ? sumPnl / n : na
+    green    = color.new(#3ddc84, 0)
+    red      = color.new(#ff6b6b, 0)
+    white    = color.new(#ffffff, 0)
+    grey     = color.new(#94a3b8, 0)
+    edgeOk   = not na(winRate) and not na(beRate) and winRate > beRate
+    table.cell(t, 0, 0, "TP/SL reality", text_color = green, text_halign = text.align_left, text_size = size.small)
+    table.cell(t, 1, 0, side + " · TP " + str.tostring(tpPct) + "% · SL " + str.tostring(slPct) + "%", text_color = grey, text_halign = text.align_right, text_size = size.tiny)
+    row(1, "Test trades closed", str.tostring(n), white)
+    row(2, "Win rate", na(winRate) ? "n/a" : f(winRate) + "%", white)
+    row(3, "Win rate needed (break-even)", na(beRate) ? "n/a" : f(beRate) + "%", edgeOk ? green : red)
+    row(4, "Average win, after fees", na(avgWin) ? "n/a" : "+" + f(avgWin) + "%", green)
+    row(5, "Average loss, after fees", na(avgLoss) ? "n/a" : "−" + f(avgLoss) + "%", red)
+    row(6, "Result per trade, after fees", na(expect) ? "n/a" : (expect >= 0 ? "+" : "") + f(expect) + "%", na(expect) or expect < 0 ? red : green)
+    row(7, "Most losses in a row (trades overlap)", str.tostring(maxStreak), white)
+    row(8, "Closed at market (time limit)", str.tostring(timeouts), white)
+    row(9, "Fees per trade (both sides)", f(fee2) + "%", red)
+    row(10, "Check", "Closed candles only; stop first if both hit", grey)

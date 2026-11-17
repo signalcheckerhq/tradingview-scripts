@@ -11,12 +11,13 @@ Same scripts as on TradingView (search "SignalCheckerHQ"), same code, so anyone 
 | [Grid Bot Reality Check](scripts/grid-bot-reality-check.pine) | A grid bot's reported "grid profit" next to the real account result, with the open position and fees included | [open](https://www.tradingview.com/script/wQCQr5Im-Grid-Bot-Reality-Check-Bot-Profit-vs-Real-Result/) |
 | [DCA Bot Reality Check](scripts/dca-bot-reality-check.pine) | Closed-deal profit vs the real result with the open deal, next to simply holding | [open](https://www.tradingview.com/script/wTaHVdqR-DCA-Bot-Reality-Check-Deal-Profit-vs-Real-Result/) |
 | [Honest Backtest](scripts/honest-backtest.pine) (strategy) | A strategy test with realistic costs (0.1% commission, slippage, no leverage, 10% per trade), next to holding the same amount. Swap in your own rules; the costs and the table stay | [open](https://www.tradingview.com/script/DGL5Cr0H-Honest-Backtest-Fees-Slippage-and-Buy-and-Hold/) |
+| [TP/SL Reality](scripts/tp-sl-reality.pine) | How often a fixed take profit and stop actually won on a coin's own candles, next to the win rate that payoff needs after fees | [open](https://www.tradingview.com/script/kyhAz4n5-TP-SL-Reality-Win-Rate-vs-Payoff/) |
 
 ## How to use
 
 1. Open TradingView, then **Pine Editor**.
 2. Paste the code of a script and click **Add to chart**. Or add the published version from the links above.
-3. Set the inputs (entry, stop, targets, bot range, fees). Every input has a tooltip.
+3. Set the inputs (entry, stop, targets, bot range, take profit and stop %, fees). Every input has a tooltip.
 
 ## Rules the scripts follow
 
