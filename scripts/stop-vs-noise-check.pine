@@ -1,0 +1,96 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+//@version=6
+// Stop vs Noise Check
+// Open source. Takes every closed bar in the lookback as a possible entry and measures how far
+// price went against it within the next N bars (the worst adverse move). Then it shows how often
+// a stop of your size would have been hit by that move alone, compares the stop with ATR, and
+// shows the stop size that random entries would have survived 50 / 80 / 90% of the time.
+// It does not predict anything. It tells you whether a stop sits inside the market's normal noise.
+indicator("Stop vs Noise Check", shorttitle = "Stop vs Noise", overlay = true, max_bars_back = 5000)
+
+// ── Inputs ─────────────────────────────────────────────
+gS       = "Your stop"
+side     = input.string("Long", "Direction", options = ["Long", "Short"], group = gS)
+stopPct  = input.float(1.0, "Stop distance %", minval = 0.01, step = 0.1, group = gS,
+     tooltip = "Distance from the entry price to the stop, in percent.")
+holdBars = input.int(24, "Within the next N bars", minval = 1, maxval = 200, group = gS,
+     tooltip = "How long you usually hold a trade, in bars of this chart. 24 bars on a 1h chart = one day.")
+gL       = "History"
+lookback = input.int(1000, "Entries to test (closed bars)", minval = 50, maxval = 2000, group = gL,
+     tooltip = "Every closed bar in this range is used as an entry at its close. More bars = steadier numbers.")
+atrLen   = input.int(14, "ATR length", minval = 1, group = gL)
+gV       = "Display"
+showLine = input.bool(true, "Show the stop and the 80% level from the last close", group = gV)
+tablePos = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = gV)
+
+isLong = side == "Long"
+atrPct = ta.atr(atrLen) / close * 100
+
+// ── Calculation on the last bar only ───────────────────
+var table tb = na
+var line  l1 = na
+var line  l2 = na
+
+if barstate.islast
+    // entries: closed bars whose next N bars are all closed too (the live bar is never used)
+    int avail = bar_index - holdBars - 1
+    int n     = math.min(lookback, avail)
+    array<float> adv = array.new<float>()
+    if n > 0
+        for o = holdBars + 1 to holdBars + n
+            float ep = close[o]
+            float worst = isLong ? low[o - 1] : high[o - 1]
+            for j = 1 to holdBars
+                worst := isLong ? math.min(worst, low[o - j]) : math.max(worst, high[o - j])
+            float a = isLong ? (ep - worst) / ep * 100 : (worst - ep) / ep * 100
+            array.push(adv, math.max(a, 0))
+    int   cnt  = array.size(adv)
+    int   hits = 0
+    if cnt > 0
+        for k = 0 to cnt - 1
+            if array.get(adv, k) >= stopPct
+                hits += 1
+    float hitRate = cnt > 0 ? float(hits) / cnt * 100 : na
+    float p50 = cnt > 0 ? array.percentile_nearest_rank(adv, 50) : na
+    float p80 = cnt > 0 ? array.percentile_nearest_rank(adv, 80) : na
+    float p90 = cnt > 0 ? array.percentile_nearest_rank(adv, 90) : na
+    float atrNow = atrPct
+    float stopAtr = atrNow > 0 ? stopPct / atrNow : na
+
+    string verdict = na(hitRate) ? "Not enough bars" :
+         hitRate >= 50 ? "Inside the noise: most entries hit this stop" :
+         hitRate >= 20 ? "Tight: many entries hit this stop" : "Outside most of the noise"
+    color vColor = na(hitRate) ? color.gray : hitRate >= 50 ? color.red : hitRate >= 20 ? color.orange : color.green
+
+    string pos = tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Bottom left" ? position.bottom_left : position.top_left
+    if not na(tb)
+        table.delete(tb)
+    tb := table.new(pos, 2, 9, bgcolor = color.new(color.black, 10), border_width = 1, border_color = color.new(color.gray, 60))
+    color tc = color.white
+    table.cell(tb, 0, 0, "Stop vs Noise", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 0, side + ", " + str.tostring(holdBars) + " bars", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 1, "Your stop", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 1, str.tostring(stopPct, "#.##") + "% (" + str.tostring(stopAtr, "#.#") + "x ATR)", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 2, "ATR(" + str.tostring(atrLen) + ") now", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 2, str.tostring(atrNow, "#.##") + "% of price", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 3, "Entries hit by the stop", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 3, na(hitRate) ? "-" : str.tostring(hitRate, "#.#") + "% (" + str.tostring(hits) + " of " + str.tostring(cnt) + ")", text_color = vColor, text_size = size.small)
+    table.cell(tb, 0, 4, "Typical worst move (50%)", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 4, str.tostring(p50, "#.##") + "%", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 5, "Stop that 80% survived", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 5, str.tostring(p80, "#.##") + "%", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 6, "Stop that 90% survived", text_color = tc, text_size = size.small)
+    table.cell(tb, 1, 6, str.tostring(p90, "#.##") + "%", text_color = tc, text_size = size.small)
+    table.cell(tb, 0, 7, verdict, text_color = vColor, text_size = size.small)
+    table.merge_cells(tb, 0, 7, 1, 7)
+    table.cell(tb, 0, 8, "Past bars only. Not a forecast, not financial advice.", text_color = color.gray, text_size = size.tiny)
+    table.merge_cells(tb, 0, 8, 1, 8)
+
+    if showLine
+        float sp  = isLong ? close * (1 - stopPct / 100) : close * (1 + stopPct / 100)
+        float s80 = isLong ? close * (1 - p80 / 100) : close * (1 + p80 / 100)
+        line.delete(l1)
+        line.delete(l2)
+        l1 := line.new(bar_index - 20, sp, bar_index + 10, sp, color = color.red, width = 2)
+        l2 := na(p80) ? na : line.new(bar_index - 20, s80, bar_index + 10, s80, color = color.orange, style = line.style_dashed)

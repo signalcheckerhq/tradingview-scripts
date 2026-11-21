@@ -13,6 +13,7 @@ Same scripts as on TradingView (search "SignalCheckerHQ"), same code, so anyone 
 | [Honest Backtest](scripts/honest-backtest.pine) (strategy) | A strategy test with realistic costs (0.1% commission, slippage, no leverage, 10% per trade), next to holding the same amount. Swap in your own rules; the costs and the table stay | [open](https://www.tradingview.com/script/DGL5Cr0H-Honest-Backtest-Fees-Slippage-and-Buy-and-Hold/) |
 | [TP/SL Reality](scripts/tp-sl-reality.pine) | How often a fixed take profit and stop actually won on a coin's own candles, next to the win rate that payoff needs after fees | [open](https://www.tradingview.com/script/kyhAz4n5-TP-SL-Reality-Win-Rate-vs-Payoff/) |
 | [Robustness Lab](scripts/robustness-lab.pine) | Tests a grid of 33 EMA-crossover settings at once with fees, picks the best on the first 60% of the chart and shows what it did on the 40% it never saw, plus a shuffled-trade drawdown range | [open](https://www.tradingview.com/script/0HD7knKK-Robustness-Lab-Out-of-Sample-and-Shuffle-Test/) |
+| [Stop vs Noise Check](scripts/stop-vs-noise-check.pine) | How often a stop of your size would have been hit by normal price swings: every closed bar tested as an entry, plus the stop sizes 50/80/90% of entries survived and your stop vs ATR | [open](https://www.tradingview.com/script/v7GXaQcU-Stop-vs-Noise-Check-Is-Your-Stop-Inside-Normal-Swings/) |
 
 ## How to use
 
