@@ -1,0 +1,364 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+//@version=6
+// Robustness Lab: Settings Grid, Out-of-Sample and Shuffled Drawdown
+// Open source. One backtest with one good-looking setting proves little. This indicator runs the
+// same EMA crossover idea with a whole grid of fast/slow lengths at once, on this chart's bars, with
+// fees and slippage. It picks the best setting on the first part of the history (in-sample) and then
+// shows what that setting did on the part it never saw (out-of-sample), how the other settings did,
+// and how deep the drawdown could have been if the same trades had come in a different order.
+// It does not predict anything and it does not give trade signals.
+indicator("Robustness Lab: Settings Grid, Out-of-Sample and Shuffled Drawdown", shorttitle = "Robustness Lab", overlay = true, max_bars_back = 500)
+
+// ── Inputs ─────────────────────────────────────────────────────────────
+gR      = "Rule tested: EMA crossover"
+fStart  = input.int(5, "Fast EMA: first length", minval = 2, maxval = 200, group = gR)
+fStep   = input.int(5, "Fast EMA: step", minval = 1, maxval = 100, group = gR)
+fCount  = input.int(6, "Fast EMA: number of lengths", minval = 1, maxval = 8, group = gR,
+     tooltip = "Rows of the grid. With 5 / 5 / 6 the fast lengths are 5, 10, 15, 20, 25, 30.")
+sStart  = input.int(20, "Slow EMA: first length", minval = 3, maxval = 400, group = gR)
+sStep   = input.int(20, "Slow EMA: step", minval = 1, maxval = 200, group = gR)
+sCount  = input.int(6, "Slow EMA: number of lengths", minval = 1, maxval = 8, group = gR,
+     tooltip = "Columns of the grid. With 20 / 20 / 6 the slow lengths are 20, 40, ... 120. Cells where fast >= slow are skipped.")
+mode    = input.string("Long only", "Direction", options = ["Long only", "Long and short"], group = gR,
+     tooltip = "Long only: buy when fast crosses above slow, sell when it crosses below. Long and short: flip between long and short on each cross.")
+gC      = "Costs"
+feePct  = input.float(0.1, "Fee per fill %", minval = 0, step = 0.01, group = gC,
+     tooltip = "Charged on every entry and every exit. 0.1% is a typical spot taker fee.")
+slipPct = input.float(0.05, "Slippage per fill %", minval = 0, step = 0.01, group = gC,
+     tooltip = "Fills are at the next bar's open, moved against you by this much.")
+gS      = "Test split"
+isPct   = input.int(60, "In-sample share of history %", minval = 20, maxval = 90, group = gS,
+     tooltip = "The best setting is chosen on this first part only. The rest of the chart is the out-of-sample test it never saw.")
+minTr   = input.int(5, "Min. in-sample trades to qualify", minval = 1, group = gS,
+     tooltip = "Settings with fewer closed trades in-sample can't be picked as the best one.")
+gM      = "Shuffle test"
+nShuf   = input.int(300, "Shuffles", minval = 50, maxval = 1000, step = 50, group = gM,
+     tooltip = "The best setting's closed trades are put in a random order this many times. The drawdown of each order is measured.")
+seedIn  = input.int(7, "Random seed", minval = 1, group = gM)
+gV      = "Display"
+view    = input.string("Out-of-sample return", "Grid shows", options = ["Out-of-sample return", "In-sample return", "Full-period return", "Max drawdown"], group = gV)
+showGrid = input.bool(true, "Show the grid", group = gV)
+gridPos = input.string("Top right", "Grid position", options = ["Top right", "Bottom right", "Bottom left", "Top left", "Middle right"], group = gV)
+sumPos  = input.string("Bottom right", "Summary position", options = ["Top right", "Bottom right", "Bottom left", "Top left", "Middle right"], group = gV)
+
+// ── Setup ──────────────────────────────────────────────────────────────
+f   = feePct / 100
+sl  = slipPct / 100
+nF  = fCount
+nS  = sCount
+nC  = nF * nS
+longShort = mode == "Long and short"
+maxLen = math.max(fStart + fStep * (nF - 1), sStart + sStep * (nS - 1))
+// split fixed once, on the first bar, so a new live bar can't move it
+var int splitBar = int(math.round(last_bar_index * isPct / 100.0))
+isOOS = bar_index >= splitBar
+
+fLen(i) => fStart + fStep * i
+sLen(j) => sStart + sStep * j
+toPos(p) => p == "Top right" ? position.top_right : p == "Bottom right" ? position.bottom_right : p == "Bottom left" ? position.bottom_left : p == "Middle right" ? position.middle_right : position.top_left
+
+// EMA values for every length, updated by hand (one array cell per length)
+var array<float> emaF  = array.new<float>(nF, na)
+var array<float> emaS  = array.new<float>(nS, na)
+var array<float> pemaF = array.new<float>(nF, na)   // previous bar's values, for cross detection
+var array<float> pemaS = array.new<float>(nS, na)
+
+// One simulated account per grid cell
+var array<int>   pos     = array.new<int>(nC, 0)      // 1 long, -1 short, 0 flat
+var array<int>   pend    = array.new<int>(nC, 2)      // target position for the next open; 2 = nothing pending
+var array<float> entryPx = array.new<float>(nC, na)
+var array<float> eq      = array.new<float>(nC, 1.0)  // equity after closed trades (start = 1)
+var array<float> peak    = array.new<float>(nC, 1.0)
+var array<float> mdd     = array.new<float>(nC, 0.0)  // max drawdown of the marked-to-market equity, %
+var array<float> eqSplit = array.new<float>(nC, na)   // marked-to-market equity at the split
+var array<int>   trIS    = array.new<int>(nC, 0)
+var array<int>   trOOS   = array.new<int>(nC, 0)
+var array<int>   winIS   = array.new<int>(nC, 0)
+var array<int>   winOOS  = array.new<int>(nC, 0)
+var array<float> lastMtm = array.new<float>(nC, 1.0)
+// every closed trade: which cell, and its return
+var array<int>   tCell = array.new<int>()
+var array<float> tRet  = array.new<float>()
+var bool tradesFull = false   // Pine arrays hold at most 100,000 items
+
+// buy and hold, same costs, from the first tradable bar
+var float holdEntry = na
+var float holdSplitC = na   // close at the split
+var float lastClose = na   // last closed bar's close
+var bool  started   = false
+startBar = maxLen + 1
+
+// Everything below runs on closed bars only, so the live bar never changes a result.
+// ── Fills at this bar's open (orders from the previous close) ──────────
+if started and barstate.isconfirmed
+    for k = 0 to nC - 1
+        int want = array.get(pend, k)
+        if want != 2
+            int cur = array.get(pos, k)
+            if want != cur
+                // close the open position
+                if cur != 0
+                    float ep = array.get(entryPx, k)
+                    float xp = cur == 1 ? open * (1 - sl) : open * (1 + sl)
+                    // a short can lose more than 100% on paper; the account can't go below zero
+                    float r  = math.max(-1.0, cur == 1 ? (xp * (1 - f)) / (ep * (1 + f)) - 1 : (ep * (1 - f) - xp * (1 + f)) / ep)
+                    array.set(eq, k, array.get(eq, k) * (1 + r))
+                    if array.size(tRet) < 99000
+                        array.push(tCell, k)
+                        array.push(tRet, r)
+                    else
+                        tradesFull := true
+                    if isOOS
+                        array.set(trOOS, k, array.get(trOOS, k) + 1)
+                        if r > 0
+                            array.set(winOOS, k, array.get(winOOS, k) + 1)
+                    else
+                        array.set(trIS, k, array.get(trIS, k) + 1)
+                        if r > 0
+                            array.set(winIS, k, array.get(winIS, k) + 1)
+                // open the new one
+                // an account at zero can't open new trades
+                if want != 0 and array.get(eq, k) > 0
+                    array.set(entryPx, k, want == 1 ? open * (1 + sl) : open * (1 - sl))
+                    array.set(pos, k, want)
+                else
+                    array.set(pos, k, 0)
+            array.set(pend, k, 2)
+
+// ── EMAs (seeded with the first close) ─────────────────────────────────
+if barstate.isconfirmed
+    lastClose := close
+    for i = 0 to nF - 1
+        float a = 2.0 / (fLen(i) + 1)
+        float prev = array.get(emaF, i)
+        array.set(pemaF, i, prev)
+        array.set(emaF, i, na(prev) ? close : prev + a * (close - prev))
+    for j = 0 to nS - 1
+        float a = 2.0 / (sLen(j) + 1)
+        float prev = array.get(emaS, j)
+        array.set(pemaS, j, prev)
+        array.set(emaS, j, na(prev) ? close : prev + a * (close - prev))
+
+// ── Signals at this bar's close, filled at the next open ──────────────
+if bar_index >= startBar and barstate.isconfirmed
+    if not started
+        started := true
+        holdEntry := close * (1 + sl) * (1 + f)
+    for i = 0 to nF - 1
+        for j = 0 to nS - 1
+            int k = i * nS + j
+            if fLen(i) < sLen(j)
+                float fe = array.get(emaF, i)
+                float se = array.get(emaS, j)
+                float pf = array.get(pemaF, i)
+                float ps = array.get(pemaS, j)
+                bool up = fe > se and pf <= ps
+                bool dn = fe < se and pf >= ps
+                int cur = array.get(pos, k)
+                if up and cur != 1
+                    array.set(pend, k, 1)
+                else if dn and cur != (longShort ? -1 : 0)
+                    array.set(pend, k, longShort ? -1 : 0)
+
+// ── Mark to market at the close: drawdown and the split snapshot ──────
+if started and barstate.isconfirmed
+    for k = 0 to nC - 1
+        int cur = array.get(pos, k)
+        float m = array.get(eq, k)
+        if cur != 0
+            float ep = array.get(entryPx, k)
+            float r  = math.max(-1.0, cur == 1 ? (close * (1 - f)) / (ep * (1 + f)) - 1 : (ep * (1 - f) - close * (1 + f)) / ep)
+            m := m * (1 + r)
+        array.set(lastMtm, k, m)
+        if m > array.get(peak, k)
+            array.set(peak, k, m)
+        float dd = array.get(peak, k) > 0 ? (1 - m / array.get(peak, k)) * 100 : 100.0
+        if dd > array.get(mdd, k)
+            array.set(mdd, k, dd)
+        if bar_index == splitBar - 1
+            array.set(eqSplit, k, m)
+    if bar_index == splitBar - 1
+        holdSplitC := close
+
+// out-of-sample area on the chart
+bgcolor(isOOS ? color.new(color.blue, 93) : na, title = "Out-of-sample part")
+
+// ── Results on the last bar ────────────────────────────────────────────
+var table grid = na
+var table sum  = na
+
+pctTxt(x) => na(x) ? "–" : (x >= 0 ? "+" : "") + str.tostring(x, "#.#") + "%"
+
+if barstate.islast and started and splitBar > startBar and not na(holdSplitC)
+    // hold: in-sample = bought at the start, sold at the split; out-of-sample = bought at the split, valued at the last closed bar
+    float holdIS  = (holdSplitC * (1 - f) / holdEntry - 1) * 100
+    float holdOOS = (lastClose * (1 - f) / (holdSplitC * (1 + sl) * (1 + f)) - 1) * 100
+    array<float> rIS  = array.new<float>(nC, na)
+    array<float> rOOS = array.new<float>(nC, na)
+    array<float> rAll = array.new<float>(nC, na)
+    array<float> validOOS = array.new<float>()
+    int posOOS = 0
+    int posIS  = 0
+    int nValid = 0
+    int best   = -1
+    float bestIS = na
+    for i = 0 to nF - 1
+        for j = 0 to nS - 1
+            int k = i * nS + j
+            if fLen(i) < sLen(j)
+                float es = array.get(eqSplit, k)
+                float em = array.get(lastMtm, k)
+                float ri = (es - 1) * 100
+                float ro = es > 0 ? (em / es - 1) * 100 : 0.0
+                array.set(rIS, k, ri)
+                array.set(rOOS, k, ro)
+                array.set(rAll, k, (em - 1) * 100)
+                array.push(validOOS, ro)
+                nValid += 1
+                posOOS += ro > 0 ? 1 : 0
+                posIS  += ri > 0 ? 1 : 0
+                if array.get(trIS, k) >= minTr and (na(bestIS) or ri > bestIS)
+                    bestIS := ri
+                    best := k
+
+    // neighbours of the best cell: is it a plateau or a lonely spike?
+    float nbAvg = na
+    if best >= 0
+        int bi = int(best / nS)
+        int bj = best % nS
+        float s = 0.0
+        int c = 0
+        for di = -1 to 1
+            for dj = -1 to 1
+                int ii = bi + di
+                int jj = bj + dj
+                if (di != 0 or dj != 0) and ii >= 0 and ii < nF and jj >= 0 and jj < nS
+                    float v = array.get(rIS, ii * nS + jj)
+                    if not na(v)
+                        s += v
+                        c += 1
+        nbAvg := c > 0 ? s / c : na
+
+    // rank of the best in-sample cell among all cells out-of-sample (1 = best)
+    int rankOOS = 0
+    float bestOOS = best >= 0 ? array.get(rOOS, best) : na
+    if best >= 0
+        for x = 0 to array.size(validOOS) - 1
+            if array.get(validOOS, x) > bestOOS
+                rankOOS += 1
+        rankOOS += 1
+    float medOOS = array.size(validOOS) > 0 ? array.median(validOOS) : na
+
+    // shuffle test on the best cell's closed trades
+    array<float> rets = array.new<float>()
+    if best >= 0 and array.size(tCell) > 0
+        for x = 0 to array.size(tCell) - 1
+            if array.get(tCell, x) == best
+                array.push(rets, array.get(tRet, x))
+    int nT = array.size(rets)
+    float ddActual = na
+    int nUsed = 0
+    float ddMed = na
+    float dd95 = na
+    if nT >= 2
+        float e = 1.0
+        float pk = 1.0
+        float d = 0.0
+        for x = 0 to nT - 1
+            e *= 1 + array.get(rets, x)
+            pk := math.max(pk, e)
+            d := math.max(d, (1 - e / pk) * 100)
+        ddActual := d
+        array<float> dds = array.new<float>()
+        array<float> tmp = array.copy(rets)
+        float seed = seedIn % 2147483646 + 1
+        // keep the last-bar work within Pine's time limit: at most ~300,000 swaps
+        nUsed := math.min(nShuf, math.max(20, int(300000 / nT)))
+        for s = 1 to nUsed
+            // Fisher-Yates with a Park-Miller generator (same seed = same result)
+            for x = nT - 1 to 1
+                seed := (seed * 48271) % 2147483647
+                int y = int(math.floor(seed / 2147483647 * (x + 1)))
+                float t = array.get(tmp, x)
+                array.set(tmp, x, array.get(tmp, y))
+                array.set(tmp, y, t)
+            float e2 = 1.0
+            float pk2 = 1.0
+            float d2 = 0.0
+            for x = 0 to nT - 1
+                e2 *= 1 + array.get(tmp, x)
+                pk2 := math.max(pk2, e2)
+                d2 := math.max(d2, (1 - e2 / pk2) * 100)
+            array.push(dds, d2)
+        ddMed := array.percentile_nearest_rank(dds, 50)
+        dd95  := array.percentile_nearest_rank(dds, 95)
+
+    // ── grid table ──
+    if showGrid
+        if not na(grid)
+            table.delete(grid)
+        grid := table.new(toPos(gridPos), nS + 1, nF + 2, bgcolor = color.new(color.black, 10), border_width = 1, border_color = color.new(color.gray, 70))
+        table.cell(grid, 0, 0, view, text_color = color.white, text_size = size.tiny)
+        table.merge_cells(grid, 0, 0, nS, 0)
+        table.cell(grid, 0, 1, "fast \\ slow", text_color = color.gray, text_size = size.tiny)
+        for j = 0 to nS - 1
+            table.cell(grid, j + 1, 1, str.tostring(sLen(j)), text_color = color.gray, text_size = size.tiny)
+        for i = 0 to nF - 1
+            table.cell(grid, 0, i + 2, str.tostring(fLen(i)), text_color = color.gray, text_size = size.tiny)
+            for j = 0 to nS - 1
+                int k = i * nS + j
+                float v = view == "Out-of-sample return" ? array.get(rOOS, k) : view == "In-sample return" ? array.get(rIS, k) : view == "Full-period return" ? array.get(rAll, k) : (na(array.get(rIS, k)) ? na : array.get(mdd, k))
+                bool isDD = view == "Max drawdown"
+                color bg = na(v) ? color.new(color.gray, 85) : isDD ? color.from_gradient(v, 0, 60, color.new(color.green, 40), color.new(color.red, 20)) : v >= 0 ? color.from_gradient(v, 0, 50, color.new(color.green, 75), color.new(color.green, 20)) : color.from_gradient(v, -50, 0, color.new(color.red, 20), color.new(color.red, 75))
+                string txt = na(v) ? "–" : isDD ? "-" + str.tostring(v, "#") + "%" : (v >= 0 ? "+" : "") + str.tostring(v, "#") + "%"
+                table.cell(grid, j + 1, i + 2, txt, bgcolor = bg, text_color = k == best ? color.yellow : color.white, text_size = size.tiny)
+
+    // ── summary table ──
+    if not na(sum)
+        table.delete(sum)
+    sum := table.new(toPos(sumPos), 2, 14, bgcolor = color.new(color.black, 10), border_width = 1, border_color = color.new(color.gray, 70))
+    color tc = color.white
+    string bestName = best >= 0 ? "EMA " + str.tostring(fLen(int(best / nS))) + " / " + str.tostring(sLen(best % nS)) : "none qualified"
+    int bIS = best >= 0 ? array.get(trIS, best) : 0
+    int bOO = best >= 0 ? array.get(trOOS, best) : 0
+    string verdict = best < 0 ? "No setting had enough in-sample trades" :
+         bestOOS <= 0 ? "Best in-sample setting lost money out-of-sample" :
+         bestOOS < holdOOS ? "Profitable out-of-sample, but holding did better" :
+         rankOOS > nValid / 2 ? "Held up, but ranked in the weaker half out-of-sample" : "Held up out-of-sample"
+    color vc = best < 0 or bestOOS <= 0 ? color.red : bestOOS < holdOOS or rankOOS > nValid / 2 ? color.orange : color.green
+    table.cell(sum, 0, 0, "Robustness Lab", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 0, str.tostring(nValid) + " settings, " + mode, text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 1, "Best in-sample", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 1, bestName + ": " + pctTxt(bestIS) + " (" + str.tostring(bIS) + " trades)", text_color = color.yellow, text_size = size.small)
+    table.cell(sum, 0, 2, "Same setting out-of-sample", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 2, pctTxt(bestOOS) + " (" + str.tostring(bOO) + " trades)", text_color = vc, text_size = size.small)
+    table.cell(sum, 0, 3, "Its out-of-sample rank", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 3, best >= 0 ? str.tostring(rankOOS) + " of " + str.tostring(nValid) : "–", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 4, "Median setting out-of-sample", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 4, pctTxt(medOOS), text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 5, "Holding out-of-sample", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 5, pctTxt(holdOOS) + " (in-sample " + pctTxt(holdIS) + ")", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 6, "Settings profitable", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 6, "in-sample " + str.tostring(posIS) + " of " + str.tostring(nValid) + ", out-of-sample " + str.tostring(posOOS) + " of " + str.tostring(nValid), text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 7, "Neighbours of the best (in-sample)", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 7, pctTxt(nbAvg) + " on average vs " + pctTxt(bestIS), text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 8, "Closed-trade drawdown, actual order", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 8, na(ddActual) ? "–" : "-" + str.tostring(ddActual, "#.#") + "% (" + str.tostring(nT) + " trades" + (tradesFull ? ", trade list full" : "") + ")", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 9, "Shuffled orders (" + str.tostring(nUsed) + "): median / worst 5%", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 9, na(ddMed) ? "–" : "-" + str.tostring(ddMed, "#.#") + "% / -" + str.tostring(dd95, "#.#") + "%", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 10, "Costs", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 10, str.tostring(feePct, "#.##") + "% fee + " + str.tostring(slipPct, "#.##") + "% slippage per fill", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 11, "Split", text_color = tc, text_size = size.small)
+    table.cell(sum, 1, 11, str.tostring(isPct) + "% in-sample / " + str.tostring(100 - isPct) + "% out-of-sample (blue)", text_color = tc, text_size = size.small)
+    table.cell(sum, 0, 12, verdict, text_color = vc, text_size = size.small)
+    table.merge_cells(sum, 0, 12, 1, 12)
+    table.cell(sum, 0, 13, "Past bars only. Not a forecast, not financial advice.", text_color = color.gray, text_size = size.tiny)
+    table.merge_cells(sum, 0, 13, 1, 13)
+
+// not enough bars for the longest EMA plus a split
+if barstate.islast and not (started and splitBar > startBar and not na(holdSplitC))
+    if not na(sum)
+        table.delete(sum)
+    sum := table.new(toPos(sumPos), 1, 1, bgcolor = color.new(color.black, 10))
+    table.cell(sum, 0, 0, "Robustness Lab: not enough bars. The longest EMA (" + str.tostring(maxLen) + ") must fit well inside the in-sample part. Load more history or use shorter lengths.", text_color = color.orange, text_size = size.small)
