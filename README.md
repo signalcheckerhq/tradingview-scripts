@@ -12,6 +12,7 @@ Same scripts as on TradingView (search "SignalCheckerHQ"), same code, so anyone 
 | [DCA Bot Reality Check](scripts/dca-bot-reality-check.pine) | Closed-deal profit vs the real result with the open deal, next to simply holding | [open](https://www.tradingview.com/script/wTaHVdqR-DCA-Bot-Reality-Check-Deal-Profit-vs-Real-Result/) |
 | [Honest Backtest](scripts/honest-backtest.pine) (strategy) | A strategy test with realistic costs (0.1% commission, slippage, no leverage, 10% per trade), next to holding the same amount. Swap in your own rules; the costs and the table stay | [open](https://www.tradingview.com/script/DGL5Cr0H-Honest-Backtest-Fees-Slippage-and-Buy-and-Hold/) |
 | [TP/SL Reality](scripts/tp-sl-reality.pine) | How often a fixed take profit and stop actually won on a coin's own candles, next to the win rate that payoff needs after fees | [open](https://www.tradingview.com/script/kyhAz4n5-TP-SL-Reality-Win-Rate-vs-Payoff/) |
+| [Robustness Lab](scripts/robustness-lab.pine) | Tests a grid of 33 EMA-crossover settings at once with fees, picks the best on the first 60% of the chart and shows what it did on the 40% it never saw, plus a shuffled-trade drawdown range | [open](https://www.tradingview.com/script/0HD7knKK-Robustness-Lab-Out-of-Sample-and-Shuffle-Test/) |
 
 ## How to use
 
