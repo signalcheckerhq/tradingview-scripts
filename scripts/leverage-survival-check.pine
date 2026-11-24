@@ -1,0 +1,122 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SignalCheckerHQ
+//@version=6
+indicator("Leverage Survival Check: Which Leverage Survived This Coin's Swings?", shorttitle = "Leverage Survival", overlay = true, max_bars_back = 5000, behind_chart = false)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+dirIn    = input.string("Long", "Direction", options = ["Long", "Short"], group = "Trade")
+nBars    = input.int(24, "Within the next N bars", minval = 1, maxval = 500, group = "Trade",
+     tooltip = "How long the position stays open. 24 bars on a 1h chart = one day.")
+entries  = input.int(1000, "Entries to test (closed bars)", minval = 50, maxval = 2000, group = "History",
+     tooltip = "Every closed bar in this range is treated as an entry at its close. More entries = steadier numbers.")
+mmPct    = input.float(0.5, "Maintenance margin %", minval = 0.0, maxval = 5.0, step = 0.1, group = "Liquidation",
+     tooltip = "Isolated margin. A position is liquidated when the move against it reaches 1/leverage minus this margin. 0.5% is typical for BTC and ETH on large exchanges; small coins often use more.")
+myLev    = input.float(10, "Your leverage (shown as a line)", minval = 1, maxval = 125, step = 1, group = "Liquidation")
+showLine = input.bool(true, "Show the liquidation line for your leverage from the last close", group = "Display")
+posIn    = input.string("Bottom left", "Table position", options = ["Bottom left", "Bottom right", "Top right", "Top left"], group = "Display")
+
+isLong = dirIn == "Long"
+mm     = mmPct / 100.0
+
+tPos = switch posIn
+    "Top right"   => position.top_right
+    "Bottom left" => position.bottom_left
+    "Top left"    => position.top_left
+    => position.bottom_right
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+liqDist(float lev) =>
+    1.0 / lev - mm
+
+pct(float x, int d) =>
+    str.tostring(x * 100.0, d == 1 ? "#0.0" : "#0.00") + "%"
+
+levTxt(float lev) =>
+    str.tostring(lev, lev < 10 ? "#0.0" : "#0") + "x"
+
+// ─── Calculation on the last bar only (closed bars, no repainting) ─────────
+var table t = table.new(tPos, 2, 20, bgcolor = color.new(color.black, 10), border_color = color.new(#434651, 0), border_width = 1, frame_color = color.new(#434651, 0), frame_width = 1)
+var line liqLine = na
+
+cell(int c, int r, string txt, color tc = #d1d4dc) =>
+    table.cell(t, c, r, txt, text_color = tc, text_size = size.small, bgcolor = color.new(color.black, 10), text_halign = c == 0 ? text.align_left : text.align_right)
+
+if barstate.islast
+    table.clear(t, 0, 0, 1, 19)
+    // The live bar is never an entry and never counted as a future bar.
+    off   = barstate.isconfirmed ? 0 : 1
+    avail = bar_index - off - nBars + 1
+    n     = math.min(entries, avail)
+    if n < 50
+        cell(0, 0, "Leverage Survival")
+        cell(1, 0, "not enough bars")
+        cell(0, 1, "Needs at least " + str.tostring(nBars + 50) + " closed bars.")
+    else
+        worst = array.new_float(0)
+        for i = 0 to n - 1
+            e  = off + nBars + i          // entry bar offset; its next nBars bars are all closed
+            ep = close[e]
+            w  = 0.0
+            for k = 1 to nBars
+                mv = isLong ? (ep - low[e - k]) / ep : (high[e - k] - ep) / ep
+                w := math.max(w, mv)
+            array.push(worst, w)
+        q50 = array.percentile_nearest_rank(worst, 50)
+        q90 = array.percentile_nearest_rank(worst, 90)
+        q99 = array.percentile_nearest_rank(worst, 99)
+        mx  = array.max(worst)
+
+        r = 0
+        cell(0, r, "Leverage Survival", #ffffff)
+        cell(1, r, dirIn + ", " + str.tostring(nBars) + " bars", #ffffff)
+        r += 1
+        cell(0, r, "Entries tested")
+        cell(1, r, str.tostring(n))
+        r += 1
+        cell(0, r, "Typical worst move (50%)")
+        cell(1, r, pct(q50, 2))
+        r += 1
+        cell(0, r, "Worst move, 90% / 99% of entries")
+        cell(1, r, pct(q90, 1) + " / " + pct(q99, 1))
+        r += 1
+        cell(0, r, "Leverage (liquidated at)", #9598a1)
+        cell(1, r, "Liquidated within " + str.tostring(nBars) + " bars", #9598a1)
+        levs = array.from(2.0, 3.0, 5.0, 10.0, 20.0, 25.0, 50.0, 75.0, 100.0)
+        for L in levs
+            d   = liqDist(L)
+            cnt = 0
+            for w in worst
+                if d <= 0 or w >= d
+                    cnt += 1
+            share = cnt * 1.0 / n
+            col   = share >= 0.5 ? color.new(#f23645, 0) : share >= 0.1 ? color.new(#ff9800, 0) : color.new(#089981, 0)
+            r += 1
+            cell(0, r, levTxt(L) + "  (" + (isLong ? "−" : "+") + pct(math.max(d, 0), 1) + ")")
+            cell(1, r, pct(share, 1) + "  (" + str.tostring(cnt) + ")", col)
+        r += 1
+        l90 = 1.0 / (q90 + mm)
+        l99 = 1.0 / (q99 + mm)
+        lmx = 1.0 / (mx + mm)
+        cell(0, r, "Highest leverage 90% survived")
+        cell(1, r, "≈ " + levTxt(l90), #ffffff)
+        r += 1
+        cell(0, r, "Highest leverage 99% survived")
+        cell(1, r, "≈ " + levTxt(l99), #ffffff)
+        r += 1
+        cell(0, r, "Highest leverage all survived")
+        cell(1, r, "≈ " + levTxt(lmx), #ffffff)
+        r += 1
+        cell(0, r, "Isolated margin, maintenance " + str.tostring(mmPct, "#0.0#") + "%. Fees and funding not included.", #787b86)
+        table.merge_cells(t, 0, r, 1, r)
+        r += 1
+        cell(0, r, "Past bars only. Not a forecast, not financial advice.", #787b86)
+        table.merge_cells(t, 0, r, 1, r)
+
+        // Liquidation line for your leverage, drawn from the last closed bar
+        line.delete(liqLine)
+        if showLine and liqDist(myLev) > 0
+            lc = close[off]
+            lp = isLong ? lc * (1 - liqDist(myLev)) : lc * (1 + liqDist(myLev))
+            liqLine := line.new(bar_index - off, lp, bar_index + 10, lp, color = color.new(#f23645, 0), width = 2, style = line.style_dashed)
+
+plot(na, "hidden", display = display.none)
